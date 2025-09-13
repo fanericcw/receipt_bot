@@ -27,7 +27,6 @@ async def send_items(ctx, items_json):
 async def on_reaction_add():
     
 
-
 @bot.command()
 async def receipt(ctx):
     if ctx.message.attachments:
