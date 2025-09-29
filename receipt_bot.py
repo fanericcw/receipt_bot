@@ -29,8 +29,17 @@ async def on_reaction_add(reaction,user):
     container = context.split(",")
     amount = container[1].split("$")[1]
     item = container[0].split(":")[1]
-    await user.send('You own $'+amount+'for the'+item+'that is paid by')
-    #send_db(amount,item,user1.name)
+    send_to_db(amount,item,user.name)
+
+@bot.event()
+async def on_reaction_remove(reaction, user):
+    context = reaction.message.content
+    container = context.split(",")
+    amount = container[1].split("$")[1]
+    item = container[0].split(":")[1]
+    if lookup_db(amount,item,user.name):
+        remove_from_db(amount,item,user.name)
+
 @bot.command()
 async def receipt(ctx):
     if ctx.message.attachments:
