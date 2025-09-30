@@ -13,8 +13,8 @@ load_dotenv(find_dotenv())
 
 # Firebase setup
 cred_obj = firebase_admin.credentials.Certificate(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"))
-default_app = firebase_admin.initialize_app(1j, {
-    'databaseURL': os.environ.get("https://receipts-10876-default-rtdb.firebaseio.com/")
+default_app = firebase_admin.initialize_app(cred_obj, {
+    'databaseURL': os.environ.get("FIREBASE_DATABASE_URL")
 })
 
 # LLM setup
@@ -48,6 +48,12 @@ intents.message_content = True
 intents.reactions = True
 bot = commands.Bot(command_prefix='$', intents=intents)
 
+async def send_react_messages(dues, channel):
+    # Function to send messages for each item in the receipt with reaction options
+    for item in dues.keys():
+        price = dues[item]
+        msg = await channel.send(f"Item: {item}, Price: ${price:.2f}.")
+
 async def parse_reaction_message(message):
     msg_id = message.id
     price = float(message.content.split(", Price: $")[1])
@@ -56,23 +62,19 @@ async def parse_reaction_message(message):
     creditor = original_msg.author
     return msg_id, item, price, creditor
 
-async def send_react_messages(dues, channel):
-    # Function to send messages for each item in the receipt with reaction options
-    for item in dues.keys():
-        price = dues[item]
-        msg = await channel.send(f"Item: {item}, Price: ${price:.2f}.")
-
-async def query_llm(members: list[discord.Member], receipt: discord.Attachment, tip: str, notes: str):
-    # Function to query the LLM with a prompt and return the response
+async def read_receipt(receipt: discord.Attachment):
+    # Function to parse receipt image and return a dictionary of items and prices
     image_bytes = await receipt.read()
     receipt_image = Image.open(image_bytes)
 
-    # Send first prompt to parse receipt
-    receipt_response = client.models.generate_content(
+    response = client.models.generate_content(
         model=MODEL, contents=[RECEIPT_PROMPT, receipt_image]
     )
-    pre_tip = json.loads(receipt_response.text)
+    items = json.loads(response.text)
+    return items
 
+async def query_llm(pre_tip: dict,members: list[discord.Member], receipt: discord.Attachment, tip: str, notes: str):
+    # Function to query the LLM with a prompt and return the response
     diners = [member.name for member in members]
     correct = False
     critic_explanation = ""
@@ -110,9 +112,8 @@ async def query_llm(members: list[discord.Member], receipt: discord.Attachment, 
     print(tip_percent)
     for user in per_person:
         per_person[user] = float(per_person[user]) * (1 + tip_percent)
-    tipped = json.dumps(per_person)
-    return tipped
-    
+    return per_person
+
 
 async def add_to_ledger(msg_id, item, price, creditor, user):
     # Function to add item and price to ledger.json
@@ -172,17 +173,19 @@ async def receipt(ctx,  mode: str = "react", tip: str = "", notes: str = ""):
             await ctx.reply('Please upload a valid image file (.jpg or .png).')
             return
         for image in images:
-            dues = await query_llm(members, image, tip, notes)
-            dues_dict = json.loads(dues)
             if mode == "react":
-                await send_react_messages(dues_dict, ctx.channel)
+                # Parse receipt image
+                pre_tip = await read_receipt(image)
+                # Send messages for each item in the receipt
+                await send_react_messages(pre_tip, ctx.channel)
             elif mode == "share":
-                # Send to LLM for processing
-                await query_llm(dues, notes)
+                    # Parse receipt image
+                    pre_tip = await read_receipt(image)
+                    # Send to LLM for processing
+                    await query_llm(pre_tip, members, image, tip, notes)
             else:
                 await ctx.reply('Invalid mode. Use "react" or "share".')
                 return
-        
         
 
 @bot.command()
