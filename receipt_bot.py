@@ -1,15 +1,20 @@
+import json
+import os
 import discord
 from PIL import Image
 from discord.ext import commands
 from dotenv import load_dotenv, find_dotenv
 import firebase_admin
 from firebase_admin import db
-import json
-import os
-import pandas as pd
 from google import genai
 
 load_dotenv(find_dotenv())
+
+intents = discord.Intents.default()
+intents.message_content = True
+intents.reactions = True
+bot = commands.Bot(command_prefix='$', intents=intents)
+bot.remove_command('help')
 
 # Firebase setup
 cred_obj = firebase_admin.credentials.Certificate(os.environ.get("GOOGLE_APPLICATION_CREDENTIALS"))
@@ -22,37 +27,32 @@ client = genai.Client(api_key=os.environ.get("GENAI_API_KEY"))
 MODEL = "gemini-2.5-flash"
 RECEIPT_PROMPT = """Here is a photo of a receipt. Create a JSON object where the keys are the names of the items and the values are the cost of the item including taxes and other fees listed if applicable such that all of the values add up to the total at the bottom of the receipt."""
 def ACTOR_PROMPT(pre_tip, notes):
-    return (f"""
+    return f"""
         Here is a JSON object representing the items ordered at a restaurant and their prices including tax and tip: {pre_tip}. Here are some additional notes on how the order was split: {notes}. Assume that unspecified items are split between all diners.
         Create a new JSON object where the keys are the names of the people who ordered and the values are the total amount each person owes. Make sure that the sum of all the values is equal to the total at the bottom of the receipt.
         Explain your reasoning and add it as an item in the JSON object with the key "explanation".
-    """)
+    """
 def ACTOR_PROMPT_CORRECTION(pre_tip, notes, critic_explanation):
-    return (f"""
+    return f"""
         Here is an incorrect JSON object representing the items ordered at a restaurant and their prices including tax and tip: {pre_tip}. Here are some additional notes on how the order was split: {notes}. Assume that unspecified items are split between all diners.
         Here is the reasoning as to why the JSON object is incorrect: {critic_explanation}.
         Create a new JSON object to arrive at the correct. Make sure that the sum of all the values is equal to the total at the bottom of the receipt.
         Explain your reasoning and add it as an item in the JSON object with the key "explanation".
-    """)
+    """
 def CRITIC_PROMPT(pre_tip, notes, diners, per_person, explanation):
-    return (f"""
+    return f"""
         Approach this as a logic problem.
         I am given a list of items in a receipt after tax: {pre_tip}, and some additional notes on how the order was split: {notes}. If there are no notes, assume all items were shared equally. The meal is shared between {diners}.
         I have a JSON object representing how much each person owes for the bill: {per_person}. This is my explanation of how I arrived at these totals: {explanation}
         Your task is to ensure that the JSON object with tax has the bill split according to the notes given, and that the sum of all diners' payments after tip is equal to the original total.
         Elaborate on why it is correct or incorrect with respect to my explanation. You may ignore negligible rounding errors of up to 1 cent. Return your results as a JSON with two keys: "is_correct" which is true or false, and "explanation" which is your reasoning.
-    """)
+    """
 
-intents = discord.Intents.default()
-intents.message_content = True
-intents.reactions = True
-bot = commands.Bot(command_prefix='$', intents=intents)
-
-async def send_react_messages(dues, channel):
+async def send_react_messages(dues, ctx):
     # Function to send messages for each item in the receipt with reaction options
     for item in dues.keys():
         price = dues[item]
-        msg = await channel.send(f"Item: {item}, Price: ${price:.2f}.")
+        await ctx.send(f"Item: {item}, Price: ${price:.2f}.")
 
 async def parse_reaction_message(message):
     msg_id = message.id
@@ -62,9 +62,9 @@ async def parse_reaction_message(message):
     creditor = original_msg.author
     return msg_id, item, price, creditor
 
-async def read_receipt(receipt: discord.Attachment):
+async def read_receipt(image: discord.Attachment):
     # Function to parse receipt image and return a dictionary of items and prices
-    image_bytes = await receipt.read()
+    image_bytes = await image.read()
     receipt_image = Image.open(image_bytes)
 
     response = client.models.generate_content(
@@ -73,7 +73,7 @@ async def read_receipt(receipt: discord.Attachment):
     items = json.loads(response.text)
     return items
 
-async def query_llm(pre_tip: dict,members: list[discord.Member], receipt: discord.Attachment, tip: str, notes: str):
+async def query_llm(pre_tip: dict, members: list[discord.Member], tip: str, notes: str):
     # Function to query the LLM with a prompt and return the response
     diners = [member.name for member in members]
     correct = False
@@ -104,7 +104,7 @@ async def query_llm(pre_tip: dict,members: list[discord.Member], receipt: discor
         critic_result = json.loads(critic_response.text)
         correct = critic_result['is_correct']
         critic_explanation = critic_result['explanation']
-    
+
     if tip[-1] != '%':
         tip_percent = float(tip) / sum(float(v) for v in pre_tip.values())
     else:
@@ -128,6 +128,7 @@ async def add_to_ledger(msg_id, item, price, creditor, user):
 
 async def remove_from_ledger(msg_id, user, creditor):
     # Function to remove item and price from ledger.json
+    # Placeholder implementation
     ref = db.reference(f'/{user.id}/{creditor.id}')
     try:
         ref.child(str(msg_id)).remove()
@@ -177,16 +178,15 @@ async def receipt(ctx,  mode: str = "react", tip: str = "", notes: str = ""):
                 # Parse receipt image
                 pre_tip = await read_receipt(image)
                 # Send messages for each item in the receipt
-                await send_react_messages(pre_tip, ctx.channel)
+                await send_react_messages(pre_tip, ctx)
             elif mode == "share":
-                    # Parse receipt image
-                    pre_tip = await read_receipt(image)
-                    # Send to LLM for processing
-                    await query_llm(pre_tip, members, image, tip, notes)
+                # Parse receipt image
+                pre_tip = await read_receipt(image)
+                # Send to LLM for processing
+                await query_llm(pre_tip, members, tip, notes)
             else:
                 await ctx.reply('Invalid mode. Use "react" or "share".')
                 return
-        
 
 @bot.command()
 async def due(ctx, member: discord.Member, amount: float):
@@ -204,4 +204,5 @@ async def debt(ctx, arg: list[discord.Member] = None):
         ctx.reply(f'{member1.mention} owes {member2.mention} $.')
     else:
         await ctx.reply('Specify two people to see money owed.')
+
 bot.run(os.environ.get("DISCORD_TOKEN"))
