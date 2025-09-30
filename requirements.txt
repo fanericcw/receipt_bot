@@ -1,5 +1,0 @@
-discord~=2.3.2
-pytesseract~=0.3.13
-Pillow~=9.3.0
-dotenv~=0.9.9
-python-dotenv~=1.1.1

@@ -21,24 +21,25 @@ async def send_items(ctx, items_json):
     # Accepts a JSON string and sends each item to the Discord channel as a message
     receipt_items = json.loads(items_json)
     for item in receipt_items:
-        await ctx.send(f"Item: {item}, Price: ${receipt_items[item]}")
-
+        await ctx.send(f"Payer: {ctx.author},Item: {item}, Price: ${receipt_items[item]}")
+async def get_items(reaction, user):
+    context =reaction.content
+    container = context.split(",")
+    amount = container[2].split("$")[1]
+    item = container[1].split(" ")[1]
+    paid = container[0].split(" ")[1]
+    return amount,item,paid
 @bot.event
 async def on_reaction_add(reaction,user):
-    context = reaction.message.content
-    container = context.split(",")
-    amount = container[1].split("$")[1]
-    item = container[0].split(":")[1]
-    send_to_db(amount,item,user.name)
+    amount,item,payer = get_items(reaction.message,user)
+    send_to_db(amount,item,user.name,payer)
+    #await user.send(f'You own {payer} ${amount} for the {item}.'}
 
 @bot.event()
 async def on_reaction_remove(reaction, user):
-    context = reaction.message.content
-    container = context.split(",")
-    amount = container[1].split("$")[1]
-    item = container[0].split(":")[1]
-    if lookup_db(amount,item,user.name):
-        remove_from_db(amount,item,user.name)
+    amount, item,payer = get_items(reaction.message, user)
+    if lookup_db(amount,item,user.name,payer):
+        remove_from_db(amount,item,user.name,payer)
 
 @bot.command()
 async def receipt(ctx):
