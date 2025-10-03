@@ -1,12 +1,15 @@
 import json
 import os
 import discord
+from typing import Any
 from PIL import Image
 from discord.ext import commands
 from dotenv import load_dotenv, find_dotenv
 import firebase_admin
 from firebase_admin import db
 from google import genai
+import firebase_admin
+from firebase_admin import db, exceptions
 
 load_dotenv(find_dotenv())
 
@@ -114,8 +117,7 @@ async def query_llm(pre_tip: dict, members: list[discord.Member], tip: str, note
         per_person[user] = float(per_person[user]) * (1 + tip_percent)
     return per_person
 
-
-async def add_to_ledger(msg_id, item, price, creditor, user):
+async def add_to_ledger(msg_id: int, item: str, price: float, user: discord.Member, creditor: discord.Member):
     # Function to add item and price to ledger.json
     ref = db.reference(f'/{user.id}/{creditor.id}')
     data = {
@@ -126,25 +128,47 @@ async def add_to_ledger(msg_id, item, price, creditor, user):
     }
     ref.set(data)
 
-async def remove_from_ledger(msg_id, user, creditor):
+async def remove_from_ledger(msg_id: int, user: discord.Member, creditor: discord.Member):
     # Function to remove item and price from ledger.json
-    # Placeholder implementation
     ref = db.reference(f'/{user.id}/{creditor.id}')
     try:
-        ref.child(str(msg_id)).remove()
-    except Exception as e:
+        ref.child(str(msg_id)).delete()
+    except exceptions.FirebaseError as e:
         print(f"Error removing from ledger: {e}. No action taken.")
 
+async def fetch_user_user_debt(user: discord.Member, creditor: discord.Member) -> float:
+    # Function to fetch a user's debt to a specified creditor from Firebase
+    ref = db.reference(f'/{user.id}/{creditor.id}')
+    snapshot = ref.get()
+    return sum(entry['price'] for entry in json.loads(snapshot.values())) if snapshot else 0.0
+
+async def fetch_user_debt(user: discord.Member) -> float:
+    # Function to fetch a user's total debt from Firebase
+    ref = db.reference(f'/{user.id}')
+    snapshot = ref.get()
+    return sum(entry.values()['price'] for entry in json.loads(snapshot.values())) if snapshot else 0.0
+
+async def fetch_user_owed(user: discord.Member) -> float:
+    # Function to fetch the total amount owed to a user from Firebase
+    ref = db.reference('/')
+    snapshot = ref.get()
+    total_owed = 0.0
+    if snapshot:
+        for creditor_id, debts in snapshot.items():
+            if user.id in debts:
+                total_owed += sum(entry['price'] for entry in json.loads(debts[user.id].values()))
+    return total_owed
+
 @bot.event
-async def on_reaction_add(reaction, user):
+async def on_reaction_add(reaction: discord.Reaction, user: discord.Member):
     # Upon an item is reacted to, add price to the ledger
     if reaction.message.author == bot.user:
         msg_id, item, price, creditor = await parse_reaction_message(reaction.message)
         # Update database with the item and price
-        await add_to_ledger(msg_id, item, price, creditor, user)
+        await add_to_ledger(msg_id, item, price, user, creditor)
 
 @bot.event
-async def on_reaction_remove(reaction, user):
+async def on_reaction_remove(reaction: discord.Reaction, user: discord.Member):
     # Upon reaction being removed, remove price from the ledger
     if reaction.message.author == bot.user:
         msg_id, creditor = await parse_reaction_message(reaction.message)[0], await parse_reaction_message(reaction.message)[3]
@@ -197,11 +221,11 @@ async def due(ctx, member: discord.Member, amount: float):
         await ctx.reply('Amount must be positive.')
 
 @bot.command()
-async def debt(ctx, arg: list[discord.Member] = None):
+async def owes(ctx, arg: list[discord.Member] = None):
     if len(arg) == 2:
         member1, member2 = arg
-        # Get the debt amount from ledger.json
-        ctx.reply(f'{member1.mention} owes {member2.mention} $.')
+        debt_amount = await fetch_user_user_debt(member1, member2)
+        ctx.reply(f'{member1.mention} owes {member2.mention} ${debt_amount}.')
     else:
         await ctx.reply('Specify two people to see money owed.')
 
