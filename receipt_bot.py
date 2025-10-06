@@ -1,17 +1,26 @@
 import json
 import os
+from io import BytesIO
 import discord
-from typing import Any
 from PIL import Image
 from discord.ext import commands
 from dotenv import load_dotenv, find_dotenv
 import firebase_admin
-from firebase_admin import db
 from google import genai
-import firebase_admin
 from firebase_admin import db, exceptions
+import logging
 
 load_dotenv(find_dotenv())
+
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.FileHandler('bot.log'),  # Log to file
+        logging.StreamHandler()           # Also log to console
+    ]
+)
+
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -51,15 +60,33 @@ def CRITIC_PROMPT(pre_tip, notes, diners, per_person, explanation):
         Elaborate on why it is correct or incorrect with respect to my explanation. You may ignore negligible rounding errors of up to 1 cent. Return your results as a JSON with two keys: "is_correct" which is true or false, and "explanation" which is your reasoning.
     """
 
+tools = [
+    {
+        "name": "lookup_discord_user",
+        "description": "Look up a Discord user ID by their name. Use this when you need to mention or reference a specific person.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The person's name to look up"
+                }
+            },
+            "required": ["name"]
+        }
+    }
+]
+
 async def send_react_messages(dues, ctx):
     # Function to send messages for each item in the receipt with reaction options
     for item in dues.keys():
         price = dues[item]
-        await ctx.send(f"Item: {item}, Price: ${price:.2f}.")
+        await ctx.reply(f"Item: {item}, Price: ${price:.2f}.", mention_author=False)
 
 async def parse_reaction_message(message):
     msg_id = message.id
-    price = float(message.content.split(", Price: $")[1])
+    logging.info("Price: " + message.content.split(", Price: $")[1][:-1])
+    price = float(message.content.split(", Price: $")[1][:-1])
     item = message.content.split(", Price: $")[0].split("Item: ")[1]
     original_msg = await message.channel.fetch_message(message.reference.message_id)
     creditor = original_msg.author
@@ -68,13 +95,28 @@ async def parse_reaction_message(message):
 async def read_receipt(image: discord.Attachment):
     # Function to parse receipt image and return a dictionary of items and prices
     image_bytes = await image.read()
-    receipt_image = Image.open(image_bytes)
+    receipt_image = Image.open(BytesIO(image_bytes))
 
     response = client.models.generate_content(
         model=MODEL, contents=[RECEIPT_PROMPT, receipt_image]
     )
-    items = json.loads(response.text)
+    logging.info(f"LLM Response: {response.text[response.text.find('{'):response.text.rfind('}') + 1]}")  # Log the LLM response for debugging
+    items = json.loads(response.text[response.text.find('{'):response.text.rfind('}') + 1])
     return items
+
+async def lookup_alias(name: str) -> str:
+    # Function to look up a user's alias in Firebase
+    ref = db.reference('/aliases')
+    snapshot = ref.get()
+    if snapshot:
+        logging.info(f"Alias snapshot: {snapshot}")  # Log the snapshot for debugging
+        for user_id, data in snapshot.values():
+            if data.get('alias') == name:
+                user_ref = db.reference(f'/users/{user_id}')
+                user_snapshot = user_ref.get()
+                if user_snapshot and 'name' in user_snapshot:
+                    return user_snapshot['name']
+    return name  # Return the original name if no alias is found
 
 async def query_llm(pre_tip: dict, members: list[discord.Member], tip: str, notes: str):
     # Function to query the LLM with a prompt and return the response
@@ -104,7 +146,7 @@ async def query_llm(pre_tip: dict, members: list[discord.Member], tip: str, note
                 "response_mime_type": "application/json",
             }
         )
-        critic_result = json.loads(critic_response.text)
+        critic_result = json.loads(critic_response.text[critic_response.text.find('{'):critic_response.text.rfind('}') + 1])
         correct = critic_result['is_correct']
         critic_explanation = critic_result['explanation']
 
@@ -160,28 +202,77 @@ async def fetch_user_owed(user: discord.Member) -> float:
     return total_owed
 
 @bot.event
-async def on_reaction_add(reaction: discord.Reaction, user: discord.Member):
-    # Upon an item is reacted to, add price to the ledger
-    if reaction.message.author == bot.user:
-        msg_id, item, price, creditor = await parse_reaction_message(reaction.message)
-        # Update database with the item and price
+async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
+    logging.info(f"Raw reaction event: User {payload.user_id} added {payload.emoji}")
+    
+    # Ignore bot's own reactions
+    if payload.user_id == bot.user.id:
+        return
+    
+    # Get the channel and message
+    channel = bot.get_channel(payload.channel_id)
+    if not channel:
+        logging.error(f"Could not find channel {payload.channel_id}")
+        return
+    
+    try:
+        message = await channel.fetch_message(payload.message_id)
+    except discord.NotFound:
+        logging.error(f"Message {payload.message_id} not found")
+        return
+    
+    # Check if message is from bot
+    if message.author == bot.user:
+        user = await bot.fetch_user(payload.user_id)
+        
+        logging.info(f"Reaction added: {user.name} reacted to bot message")
+        
+        msg_id, item, price, creditor = await parse_reaction_message(message)
+        logging.info(f"Parsed: {item} - ${price} for {creditor.mention}")
+        if user.id == creditor.id:
+            logging.info(f"Ignoring reaction: {user.name} is the creditor")
+            return
         await add_to_ledger(msg_id, item, price, user, creditor)
 
+
 @bot.event
-async def on_reaction_remove(reaction: discord.Reaction, user: discord.Member):
-    # Upon reaction being removed, remove price from the ledger
-    if reaction.message.author == bot.user:
-        msg_id, creditor = await parse_reaction_message(reaction.message)[0], await parse_reaction_message(reaction.message)[3]
-        # Remove entry from database
+async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
+    logging.info(f"Raw reaction remove event: User {payload.user_id} removed {payload.emoji}")
+    
+    # Ignore bot's own reactions
+    if payload.user_id == bot.user.id:
+        return
+    
+    # Get the channel and message
+    channel = bot.get_channel(payload.channel_id)
+    if not channel:
+        logging.error(f"Could not find channel {payload.channel_id}")
+        return
+    
+    try:
+        message = await channel.fetch_message(payload.message_id)
+    except discord.NotFound:
+        logging.error(f"Message {payload.message_id} not found")
+        return
+    
+    # Check if message is from bot
+    if message.author == bot.user:
+        user = await bot.fetch_user(payload.user_id)
+        
+        logging.info(f"Reaction removed: {user.name} removed reaction from bot message")
+        
+        msg_id, item, price, creditor = await parse_reaction_message(message)
+        logging.info(f"Removing: {item} - ${price} for {creditor.mention}")
         await remove_from_ledger(msg_id, user, creditor)
 
 @bot.command()
 async def help(ctx):
     help_text = (
         "Commands:\n"
-        "$receipt [mode] [tip] [notes] - Upload a receipt image and mention users to share with. Mode can be 'react' or 'due'. Add notes to specify how to split the bill.\n"
+        "$receipt [mode] [tip] [notes] [mentions] - Upload a receipt image and mention users to share with. Mode can be 'react' or 'share'. Add notes to specify how to split the bill. Message sender is included in members list already.\n"
         "$due @user amount - Record that you owe a user a certain amount.\n"
-        "$debt @user1 @user2 - Check how much user1 owes user2.\n"
+        "$owes @user1 @user2 - Check how much user1 owes user2.\n"
+        "$alias name - Set an alias for yourself for $receipt share function.\n"
     )
     await ctx.reply(help_text, mention_author=False)
 
@@ -189,10 +280,8 @@ async def help(ctx):
 async def receipt(ctx,  mode: str = "react", tip: str = "", notes: str = ""):
     if not ctx.message.attachments:
         await ctx.reply('Please upload your receipt image.')
-    elif not ctx.message.mentions:
-        await ctx.reply('Please mention the user(s) you want to share the receipt with.')
     else:
-        members = ctx.message.mentions + [ctx.message.author]
+        members = set(ctx.message.mentions + [ctx.message.author])
         images = [a for a in ctx.message.attachments if a.filename.lower().endswith(('.jpg', '.png'))]
         if not images:
             await ctx.reply('Please upload a valid image file (.jpg or .png).')
@@ -204,10 +293,18 @@ async def receipt(ctx,  mode: str = "react", tip: str = "", notes: str = ""):
                 # Send messages for each item in the receipt
                 await send_react_messages(pre_tip, ctx)
             elif mode == "share":
+                if not ctx.message.mentions:
+                    await ctx.reply('Please mention the user(s) you want to share the receipt with.')
+                    return
                 # Parse receipt image
                 pre_tip = await read_receipt(image)
                 # Send to LLM for processing
-                await query_llm(pre_tip, members, tip, notes)
+                per_person = await query_llm(pre_tip, members, tip, notes)
+                per_person_msg = ""
+                for user, amount in per_person.items():
+                    per_person_msg += f"{user.mention} owes ${amount:.2f}.\n"
+                per_person_msg += "Total: $" + f"{sum(per_person.values()):.2f}."
+                await ctx.reply(per_person_msg)
             else:
                 await ctx.reply('Invalid mode. Use "react" or "share".')
                 return
@@ -216,6 +313,7 @@ async def receipt(ctx,  mode: str = "react", tip: str = "", notes: str = ""):
 async def due(ctx, member: discord.Member, amount: float):
     if amount > 0:
         # Update ledger with amount owed
+        await add_to_ledger(ctx.message.id, "manual entry", amount, ctx.message.author, member)
         await ctx.reply(f'Updated {member.mention}\'s debt by ${amount}.')
     else:
         await ctx.reply('Amount must be positive.')
@@ -228,5 +326,23 @@ async def owes(ctx, arg: list[discord.Member] = None):
         ctx.reply(f'{member1.mention} owes {member2.mention} ${debt_amount}.')
     else:
         await ctx.reply('Specify two people to see money owed.')
+
+@bot.command()
+async def alias(ctx, alias: str):
+    ref = db.reference('/aliases')
+    ref.set({ctx.message.author.id: alias})
+    await ctx.reply(f'"{alias}" added as your alias')
+
+# Debug command to view all aliases
+# @bot.command()
+# async def relation(ctx):
+#     ref = db.reference('/aliases')
+#     snapshot = ref.get()
+#     if snapshot:
+#         relation_msg = "Aliases:\n"
+#         for user_id, data in snapshot.items():
+#             user = await bot.fetch_user(int(user_id))
+#             relation_msg += f"{user.name} -> {data.get('alias', 'No alias set')}\n"
+#         await ctx.reply(relation_msg)
 
 bot.run(os.environ.get("DISCORD_TOKEN"))
