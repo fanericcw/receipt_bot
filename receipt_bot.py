@@ -7,7 +7,7 @@ from discord.ext import commands
 from dotenv import load_dotenv, find_dotenv
 import firebase_admin
 from google import genai
-from firebase_admin import db, exceptions
+from firebase_admin import db
 import logging
 
 load_dotenv(find_dotenv())
@@ -20,7 +20,6 @@ logging.basicConfig(
         logging.StreamHandler()           # Also log to console
     ]
 )
-
 
 intents = discord.Intents.default()
 intents.message_content = True
@@ -37,45 +36,33 @@ default_app = firebase_admin.initialize_app(cred_obj, {
 # LLM setup
 client = genai.Client(api_key=os.environ.get("GENAI_API_KEY"))
 MODEL = "gemini-2.5-flash"
-RECEIPT_PROMPT = """Here is a photo of a receipt. Create a JSON object where the keys are the names of the items and the values are the cost of the item including taxes and other fees listed if applicable such that all of the values add up to the total at the bottom of the receipt."""
-def ACTOR_PROMPT(pre_tip, notes):
+RECEIPT_PROMPT = """Here is a photo of a receipt. Create a JSON object where the keys are the names of the items and the values are the cost of the item including taxes and other fees listed if applicable such that all of the values add up to the total at the bottom of the receipt. Do not stack items. If an item is listed multiple times, make a new key for each instance of the item with a number appended to the end of the name. If an item has a quantity greater than 1, split it into multiple items with the same name and append a number to the end of each instance of the item. Ignore any items that are not food or drink, such as "cash" or "change". If there is a tip listed, ignore it. If there is a tax listed, include it in the price of the items. If there is no tax listed, assume that the prices already include tax. If there are any discounts or coupons listed, subtract them from the total and distribute the discount evenly across all items. Do not include any items that are not food or drink in the JSON object. Here is the receipt image:"""
+def ACTOR_PROMPT(pre_tip, notes, diners, aliases_dict):
     return f"""
-        Here is a JSON object representing the items ordered at a restaurant and their prices including tax and tip: {pre_tip}. Here are some additional notes on how the order was split: {notes}. Assume that unspecified items are split between all diners.
-        Create a new JSON object where the keys are the names of the people who ordered and the values are the total amount each person owes. Make sure that the sum of all the values is equal to the total at the bottom of the receipt.
+        You are a bill-splitting assistant for a Discord server.
+        Here is a JSON object representing the items ordered at a restaurant and their prices including tax and tip: {pre_tip}. Here are some additional notes on how the order was split: {notes}. The diners are: {diners}. Assume that unspecified items are split between all diners.
+        Create a new JSON object where the keys are the names of the people who ordered and the values are the total amount each person owes. Substitute all aliases with their Discord ID using this dictionary: {aliases_dict}, and use placeholder IDs for any unknown users. Do not make duplicate calls for the same user, and make sure all aliases have been looked up.
+        Make sure that the sum of all the values is equal to the total at the bottom of the receipt, and all diners are included in the JSON object unless the notes specifiy otherwise.
         Explain your reasoning and add it as an item in the JSON object with the key "explanation".
     """
-def ACTOR_PROMPT_CORRECTION(pre_tip, notes, critic_explanation):
+def ACTOR_PROMPT_CORRECTION(pre_tip, notes, diners, critic_explanation, aliases_dict):
     return f"""
-        Here is an incorrect JSON object representing the items ordered at a restaurant and their prices including tax and tip: {pre_tip}. Here are some additional notes on how the order was split: {notes}. Assume that unspecified items are split between all diners.
+        You are a bill-splitting assistant for a Discord server.
+        Here is an incorrect JSON object representing the items ordered at a restaurant and their prices including tax and tip: {pre_tip}. Here are some additional notes on how the order was split: {notes}. The diners are: {diners}. Assume that unspecified items are split between all diners.
         Here is the reasoning as to why the JSON object is incorrect: {critic_explanation}.
-        Create a new JSON object to arrive at the correct. Make sure that the sum of all the values is equal to the total at the bottom of the receipt.
+        Create a new JSON object to represent the correct distribution of costs. Substitute all aliases with their Discord ID using this dictionary: {aliases_dict}, and use placeholder IDs for any unknown users. Do not make duplicate calls for the same user, and make sure all aliases have been looked up.
+        Make sure that the sum of all the values is equal to the total at the bottom of the receipt, and all diners are included in the JSON object unless the notes specifiy otherwise.
         Explain your reasoning and add it as an item in the JSON object with the key "explanation".
     """
-def CRITIC_PROMPT(pre_tip, notes, diners, per_person, explanation):
+def CRITIC_PROMPT(pre_tip, notes, diners, per_person, explanation, aliases_dict):
     return f"""
         Approach this as a logic problem.
         I am given a list of items in a receipt after tax: {pre_tip}, and some additional notes on how the order was split: {notes}. If there are no notes, assume all items were shared equally. The meal is shared between {diners}.
         I have a JSON object representing how much each person owes for the bill: {per_person}. This is my explanation of how I arrived at these totals: {explanation}
-        Your task is to ensure that the JSON object with tax has the bill split according to the notes given, and that the sum of all diners' payments after tip is equal to the original total.
+        Your task is to ensure that the JSON object with tax has the bill split according to the notes given, and that the sum of all diners' payments after tip is equal to the original total. Make sure all of the listed diners are included in the JSON object, unless the notes specifiy otherwise.
+        Use this dictionary to substitute all aliases with their Discord ID if needed: {aliases_dict}.
         Elaborate on why it is correct or incorrect with respect to my explanation. You may ignore negligible rounding errors of up to 1 cent. Return your results as a JSON with two keys: "is_correct" which is true or false, and "explanation" which is your reasoning.
     """
-
-tools = [
-    {
-        "name": "lookup_discord_user",
-        "description": "Look up a Discord user ID by their name. Use this when you need to mention or reference a specific person.",
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "The person's name to look up"
-                }
-            },
-            "required": ["name"]
-        }
-    }
-]
 
 async def send_react_messages(dues, ctx):
     # Function to send messages for each item in the receipt with reaction options
@@ -104,48 +91,58 @@ async def read_receipt(image: discord.Attachment):
     items = json.loads(response.text[response.text.find('{'):response.text.rfind('}') + 1])
     return items
 
-async def lookup_alias(name: str) -> str:
-    # Function to look up a user's alias in Firebase
-    ref = db.reference('/aliases')
+async def get_aliases_dict(ctx) -> dict:
+    ref = db.reference(f'/aliases/{ctx.guild.id}')
     snapshot = ref.get()
     if snapshot:
-        logging.info(f"Alias snapshot: {snapshot}")  # Log the snapshot for debugging
-        for user_id, data in snapshot.values():
-            if data.get('alias') == name:
-                user_ref = db.reference(f'/users/{user_id}')
-                user_snapshot = user_ref.get()
-                if user_snapshot and 'name' in user_snapshot:
-                    return user_snapshot['name']
-    return name  # Return the original name if no alias is found
+        aliases_dict = {v: k for k, v in snapshot.items()}
+        logging.info(f"Aliases dict: {aliases_dict}")  # Log the aliases dictionary for debugging
+        return aliases_dict
+    else:
+        await ctx.reply("No aliases found in the database for this server.")
 
-async def query_llm(pre_tip: dict, members: list[discord.Member], tip: str, notes: str):
+async def find_user_by_id(guild: discord.Guild, id: int) -> discord.Member | None:
+    """Search by user ID"""
+    logging.info(guild.members)  # Log the list of members in the guild for debugging
+    for member in guild.members:
+        logging.info(f"Checking member: {member} with ID: {member.id} against ID: {id}")  # Log each member being checked
+        if member.id == id:
+            return member
+    return None
+
+async def query_llm(ctx, pre_tip: dict, members: list[discord.Member], tip: str, notes: str):
     # Function to query the LLM with a prompt and return the response
     diners = [member.name for member in members]
+    aliases_dict = await get_aliases_dict(ctx)
     correct = False
     critic_explanation = ""
 
     while not correct:
         # Send second prompt to split the bill
         if critic_explanation:
-            actor_response = client.models.generate_content(
-                model=MODEL, contents=[diners, ACTOR_PROMPT_CORRECTION(pre_tip, notes, critic_explanation)]
-            )
+            contents = [ACTOR_PROMPT_CORRECTION(pre_tip, notes, diners, critic_explanation, aliases_dict)]
         else:
-            actor_response = client.models.generate_content(
-                model=MODEL, contents=[diners, ACTOR_PROMPT(pre_tip, notes)]
-            )
-        result = json.loads(actor_response.text)
+            contents = [ACTOR_PROMPT(pre_tip, notes, diners, aliases_dict)]
+        actor_response = client.models.generate_content(
+            model=MODEL, contents=contents,
+        )
+
+        actor_response_text = actor_response.text
+        logging.info(f"Actor LLM Raw Response: {actor_response_text}")
+        logging.info(f"Actor LLM Response: {actor_response_text[actor_response_text.find('{'):actor_response_text.rfind('}') + 1]}")  # Log the LLM response for debugging
+        result = json.loads(actor_response_text[actor_response_text.find('{'):actor_response_text.rfind('}') + 1])
         actor_explanation = result.pop("explanation")
         per_person = dict(result)
 
         # Third prompt to verify correctness
         critic_response = client.models.generate_content(
             model="gemini-2.5-flash",
-            contents=[CRITIC_PROMPT(pre_tip, notes, diners, per_person, actor_explanation)],
+            contents=[CRITIC_PROMPT(pre_tip, notes, diners, per_person, actor_explanation, aliases_dict)],
             config={
                 "response_mime_type": "application/json",
             }
         )
+        logging.info(f"Critic LLM Response: {critic_response.text[critic_response.text.find('{'):critic_response.text.rfind('}') + 1]}")  # Log the LLM response for debugging
         critic_result = json.loads(critic_response.text[critic_response.text.find('{'):critic_response.text.rfind('}') + 1])
         correct = critic_result['is_correct']
         critic_explanation = critic_result['explanation']
@@ -161,22 +158,44 @@ async def query_llm(pre_tip: dict, members: list[discord.Member], tip: str, note
 
 async def add_to_ledger(msg_id: int, item: str, price: float, user: discord.Member, creditor: discord.Member):
     # Function to add item and price to ledger.json
-    ref = db.reference(f'/{user.id}/{creditor.id}')
-    data = {
-        str(msg_id): {
+    ref = db.reference(f'/{user.id}/{creditor.id}/{msg_id}')
+    
+    # Get existing items for this msg_id
+    existing_data = ref.get()
+    
+    if existing_data is None:
+        # First item for this message
+        items = [{
             'item': item,
             'price': price,
-        }
-    }
-    ref.set(data)
+        }]
+    else:
+        # Append to existing items
+        items = existing_data if isinstance(existing_data, list) else []
+        items.append({
+            'item': item,
+            'price': price,
+        })
+    
+    # Save the updated list
+    ref.set(items)
 
-async def remove_from_ledger(msg_id: int, user: discord.Member, creditor: discord.Member):
+async def remove_from_ledger(msg_id: int, item: str, price: float,user: discord.Member, creditor: discord.Member):
     # Function to remove item and price from ledger.json
-    ref = db.reference(f'/{user.id}/{creditor.id}')
-    try:
-        ref.child(str(msg_id)).delete()
-    except exceptions.FirebaseError as e:
-        print(f"Error removing from ledger: {e}. No action taken.")
+    ref = db.reference(f'/{user.id}/{creditor.id}/{msg_id}')
+    items = ref.get()
+    if items:
+        for i, item_data in enumerate(items):
+            if item_data.get('item') == item:
+                removed_item = items.pop(i)
+                
+                # Update the database
+                if len(items) == 0:
+                    ref.delete()
+                else:
+                    ref.set(items)
+                logging.info(f"Removed item: {removed_item}")
+                return removed_item
 
 async def fetch_user_user_debt(user: discord.Member, creditor: discord.Member) -> float:
     # Function to fetch a user's debt to a specified creditor from Firebase
@@ -263,13 +282,13 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
         
         msg_id, item, price, creditor = await parse_reaction_message(message)
         logging.info(f"Removing: {item} - ${price} for {creditor.mention}")
-        await remove_from_ledger(msg_id, user, creditor)
+        await remove_from_ledger(msg_id, item, price, user, creditor)
 
 @bot.command()
 async def help(ctx):
     help_text = (
         "Commands:\n"
-        "$receipt [mode] [tip] [notes] [mentions] - Upload a receipt image and mention users to share with. Mode can be 'react' or 'share'. Add notes to specify how to split the bill. Message sender is included in members list already.\n"
+        '$receipt [mode] [tip] "[notes]" [mentions] - Upload a receipt image and mention users to share with. Mode can be "react" or "share". Add notes to specify how to split the bill. Message sender is included in members list already.\n'
         "$due @user amount - Record that you owe a user a certain amount.\n"
         "$owes @user1 @user2 - Check how much user1 owes user2.\n"
         "$alias name - Set an alias for yourself for $receipt share function.\n"
@@ -299,12 +318,20 @@ async def receipt(ctx,  mode: str = "react", tip: str = "", notes: str = ""):
                 # Parse receipt image
                 pre_tip = await read_receipt(image)
                 # Send to LLM for processing
-                per_person = await query_llm(pre_tip, members, tip, notes)
+                logging.info("Notes: " + notes)
+                per_person = await query_llm(ctx, pre_tip, members, tip, notes)
                 per_person_msg = ""
-                for user, amount in per_person.items():
-                    per_person_msg += f"{user.mention} owes ${amount:.2f}.\n"
+                err_count = 0
+                for user_id, amount in per_person.items():
+                    user_member = await find_user_by_id(ctx.guild, user_id)
+                    if user_member:
+                        per_person_msg += f"{user_member.mention} owes ${amount:.2f}.\n"
+                    else:
+                        per_person_msg += f"{user_id} owes ${amount:.2f} (could not match to a user).\n"
+                        err_count += 1     
                 per_person_msg += "Total: $" + f"{sum(per_person.values()):.2f}."
                 await ctx.reply(per_person_msg)
+                # Update ledger in Firebase
             else:
                 await ctx.reply('Invalid mode. Use "react" or "share".')
                 return
@@ -329,20 +356,26 @@ async def owes(ctx, arg: list[discord.Member] = None):
 
 @bot.command()
 async def alias(ctx, alias: str):
-    ref = db.reference('/aliases')
-    ref.set({ctx.message.author.id: alias})
-    await ctx.reply(f'"{alias}" added as your alias')
+    ref = db.reference(f'/aliases/{ctx.guild.id}')
+    new_alias = {ctx.message.author.id: alias}
+    if ref.get():
+        ref.update(new_alias)
+    else:
+        ref.set(new_alias)
+    await ctx.reply(f'"{alias}" set as your alias for this server.')
 
 # Debug command to view all aliases
-# @bot.command()
-# async def relation(ctx):
-#     ref = db.reference('/aliases')
-#     snapshot = ref.get()
-#     if snapshot:
-#         relation_msg = "Aliases:\n"
-#         for user_id, data in snapshot.items():
-#             user = await bot.fetch_user(int(user_id))
-#             relation_msg += f"{user.name} -> {data.get('alias', 'No alias set')}\n"
-#         await ctx.reply(relation_msg)
+@bot.command()
+async def debug_aliases(ctx, name: str):
+    ref = db.reference('/aliases')
+    snapshot = ref.get()
+    if snapshot:
+        logging.info(f"Alias snapshot: {snapshot}")  # Log the snapshot for debugging
+        for user_id, data in snapshot.items():
+            if data.get('alias', '').lower() == name.lower():
+                logging.info(f"Found alias: {user_id} for {name}")  # Log the found alias
+                await ctx.reply(f"Alias for {name}: {user_id}")
+    else:
+        await ctx.reply("No aliases found in the database.")
 
 bot.run(os.environ.get("DISCORD_TOKEN"))
