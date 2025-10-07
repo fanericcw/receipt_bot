@@ -24,6 +24,7 @@ logging.basicConfig(
 intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
+intents.members = True
 bot = commands.Bot(command_prefix='$', intents=intents)
 bot.remove_command('help')
 
@@ -40,15 +41,15 @@ RECEIPT_PROMPT = """Here is a photo of a receipt. Create a JSON object where the
 def ACTOR_PROMPT(pre_tip, notes, diners, aliases_dict):
     return f"""
         You are a bill-splitting assistant for a Discord server.
-        Here is a JSON object representing the items ordered at a restaurant and their prices including tax and tip: {pre_tip}. Here are some additional notes on how the order was split: {notes}. The diners are: {diners}. Assume that unspecified items are split between all diners.
-        Create a new JSON object where the keys are the names of the people who ordered and the values are the total amount each person owes. Substitute all aliases with their Discord ID using this dictionary: {aliases_dict}, and use placeholder IDs for any unknown users. Do not make duplicate calls for the same user, and make sure all aliases have been looked up.
+        Here is a JSON object representing the items ordered at a restaurant and their prices including tax and tip: {pre_tip}. Here are some additional notes on how the order was split: {notes}. The diners' IDs are: {diners}. Assume that unspecified items are split between all diners.
+        Create a new JSON object where the keys are the names of the people who ordered and the values are the total amount each person owes. Substitute all aliases with their Discord ID using this dictionary: {aliases_dict}, and use the diners' ID if there is no known alias for them. Do not make duplicate calls for the same user, and make sure all aliases have been looked up.
         Make sure that the sum of all the values is equal to the total at the bottom of the receipt, and all diners are included in the JSON object unless the notes specifiy otherwise.
         Explain your reasoning and add it as an item in the JSON object with the key "explanation".
     """
 def ACTOR_PROMPT_CORRECTION(pre_tip, notes, diners, critic_explanation, aliases_dict):
     return f"""
         You are a bill-splitting assistant for a Discord server.
-        Here is an incorrect JSON object representing the items ordered at a restaurant and their prices including tax and tip: {pre_tip}. Here are some additional notes on how the order was split: {notes}. The diners are: {diners}. Assume that unspecified items are split between all diners.
+        Here is an incorrect JSON object representing the items ordered at a restaurant and their prices including tax and tip: {pre_tip}. Here are some additional notes on how the order was split: {notes}. The diners' IDs are: {diners}. Assume that unspecified items are split between all diners.
         Here is the reasoning as to why the JSON object is incorrect: {critic_explanation}.
         Create a new JSON object to represent the correct distribution of costs. Substitute all aliases with their Discord ID using this dictionary: {aliases_dict}, and use placeholder IDs for any unknown users. Do not make duplicate calls for the same user, and make sure all aliases have been looked up.
         Make sure that the sum of all the values is equal to the total at the bottom of the receipt, and all diners are included in the JSON object unless the notes specifiy otherwise.
@@ -57,7 +58,7 @@ def ACTOR_PROMPT_CORRECTION(pre_tip, notes, diners, critic_explanation, aliases_
 def CRITIC_PROMPT(pre_tip, notes, diners, per_person, explanation, aliases_dict):
     return f"""
         Approach this as a logic problem.
-        I am given a list of items in a receipt after tax: {pre_tip}, and some additional notes on how the order was split: {notes}. If there are no notes, assume all items were shared equally. The meal is shared between {diners}.
+        I am given a list of items in a receipt after tax: {pre_tip}, and some additional notes on how the order was split: {notes}. If there are no notes, assume all items were shared equally. The diners' IDs are: {diners}.
         I have a JSON object representing how much each person owes for the bill: {per_person}. This is my explanation of how I arrived at these totals: {explanation}
         Your task is to ensure that the JSON object with tax has the bill split according to the notes given, and that the sum of all diners' payments after tip is equal to the original total. Make sure all of the listed diners are included in the JSON object, unless the notes specifiy otherwise.
         Use this dictionary to substitute all aliases with their Discord ID if needed: {aliases_dict}.
@@ -103,58 +104,71 @@ async def get_aliases_dict(ctx) -> dict:
 
 async def find_user_by_id(guild: discord.Guild, id: int) -> discord.Member | None:
     """Search by user ID"""
-    logging.info(guild.members)  # Log the list of members in the guild for debugging
-    for member in guild.members:
-        logging.info(f"Checking member: {member} with ID: {member.id} against ID: {id}")  # Log each member being checked
-        if member.id == id:
-            return member
-    return None
+    member = guild.get_member(id)
+    if member:
+        return member
+    
+    # If not in cache, try fetching directly (requires member intent)
+    try:
+        member = await guild.fetch_member(id)
+        return member
+    except discord.NotFound:
+        logging.info(f"Member with ID {id} not found in guild {guild.name}")
+        return None
+    except discord.HTTPException as e:
+        logging.error(f"Error fetching member: {e}")
+        return None
 
 async def query_llm(ctx, pre_tip: dict, members: list[discord.Member], tip: str, notes: str):
     # Function to query the LLM with a prompt and return the response
-    diners = [member.name for member in members]
+    diners = [member.id for member in members]
     aliases_dict = await get_aliases_dict(ctx)
     correct = False
     critic_explanation = ""
 
-    while not correct:
-        # Send second prompt to split the bill
-        if critic_explanation:
-            contents = [ACTOR_PROMPT_CORRECTION(pre_tip, notes, diners, critic_explanation, aliases_dict)]
+    try:
+        while not correct:
+            # Send second prompt to split the bill
+            if critic_explanation:
+                contents = [ACTOR_PROMPT_CORRECTION(pre_tip, notes, diners, critic_explanation, aliases_dict)]
+            else:
+                contents = [ACTOR_PROMPT(pre_tip, notes, diners, aliases_dict)]
+            actor_response = client.models.generate_content(
+                model=MODEL, contents=contents,
+            )
+
+            actor_response_text = actor_response.text
+            # logging.info(f"Actor LLM Raw Response: {actor_response_text}")
+            logging.info(f"Actor LLM Response: {actor_response_text[actor_response_text.find('{'):actor_response_text.rfind('}') + 1]}")  # Log the LLM response for debugging
+            result = json.loads(actor_response_text[actor_response_text.find('{'):actor_response_text.rfind('}') + 1])
+            actor_explanation = result.pop("explanation")
+            per_person = dict(result)
+
+            # Third prompt to verify correctness
+            critic_response = client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=[CRITIC_PROMPT(pre_tip, notes, diners, per_person, actor_explanation, aliases_dict)],
+                config={
+                    "response_mime_type": "application/json",
+                }
+            )
+            logging.info(f"Critic LLM Response: {critic_response.text[critic_response.text.find('{'):critic_response.text.rfind('}') + 1]}")  # Log the LLM response for debugging
+            critic_result = json.loads(critic_response.text[critic_response.text.find('{'):critic_response.text.rfind('}') + 1])
+            correct = critic_result['is_correct']
+            critic_explanation = critic_result['explanation']
+
+        if tip[-1] != '%':
+            tip_percent = float(tip) / sum(float(v) for v in pre_tip.values())
         else:
-            contents = [ACTOR_PROMPT(pre_tip, notes, diners, aliases_dict)]
-        actor_response = client.models.generate_content(
-            model=MODEL, contents=contents,
-        )
-
-        actor_response_text = actor_response.text
-        logging.info(f"Actor LLM Raw Response: {actor_response_text}")
-        logging.info(f"Actor LLM Response: {actor_response_text[actor_response_text.find('{'):actor_response_text.rfind('}') + 1]}")  # Log the LLM response for debugging
-        result = json.loads(actor_response_text[actor_response_text.find('{'):actor_response_text.rfind('}') + 1])
-        actor_explanation = result.pop("explanation")
-        per_person = dict(result)
-
-        # Third prompt to verify correctness
-        critic_response = client.models.generate_content(
-            model="gemini-2.5-flash",
-            contents=[CRITIC_PROMPT(pre_tip, notes, diners, per_person, actor_explanation, aliases_dict)],
-            config={
-                "response_mime_type": "application/json",
-            }
-        )
-        logging.info(f"Critic LLM Response: {critic_response.text[critic_response.text.find('{'):critic_response.text.rfind('}') + 1]}")  # Log the LLM response for debugging
-        critic_result = json.loads(critic_response.text[critic_response.text.find('{'):critic_response.text.rfind('}') + 1])
-        correct = critic_result['is_correct']
-        critic_explanation = critic_result['explanation']
-
-    if tip[-1] != '%':
-        tip_percent = float(tip) / sum(float(v) for v in pre_tip.values())
-    else:
-        tip_percent = int(tip.strip('%')) / 100
-    print(tip_percent)
-    for user in per_person:
-        per_person[user] = float(per_person[user]) * (1 + tip_percent)
-    return per_person
+            tip_percent = int(tip.strip('%')) / 100
+        print(tip_percent)
+        for user in per_person:
+            per_person[user] = float(per_person[user]) * (1 + tip_percent)
+        return per_person
+    except Exception as e:
+        logging.error(f"Error querying LLM: {e}")
+        await ctx.reply("There was an error processing the receipt. Please try again.")
+        return {}
 
 async def add_to_ledger(msg_id: int, item: str, price: float, user: discord.Member, creditor: discord.Member):
     # Function to add item and price to ledger.json
@@ -309,8 +323,16 @@ async def receipt(ctx,  mode: str = "react", tip: str = "", notes: str = ""):
             if mode == "react":
                 # Parse receipt image
                 pre_tip = await read_receipt(image)
+                post_tip = pre_tip
+                if tip:
+                    if tip[-1] != '%':
+                        tip_percent = float(tip) / sum(float(v) for v in pre_tip.values())
+                    else:
+                        tip_percent = int(tip.strip('%')) / 100
+                    logging.info(f"Tip percent: {tip_percent}")
+                    post_tip = {item: price * (1 + tip_percent) for item, price in pre_tip.items()}
                 # Send messages for each item in the receipt
-                await send_react_messages(pre_tip, ctx)
+                await send_react_messages(post_tip, ctx)
             elif mode == "share":
                 if not ctx.message.mentions:
                     await ctx.reply('Please mention the user(s) you want to share the receipt with.')
