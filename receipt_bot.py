@@ -342,6 +342,12 @@ async def receipt(ctx,  mode: str = "react", tip: str = "", notes: str = ""):
                 # Send to LLM for processing
                 logging.info("Notes: " + notes)
                 per_person = await query_llm(ctx, pre_tip, members, tip, notes)
+                for user_id, amount in per_person.items():
+                    author_id = ctx.message.author.id
+                    user = await find_user_by_id(ctx.guild, user_id)
+                    logging.info(f"{author_id} vs {user_id}: {author_id == int(user_id)}")
+                    if int(user_id) != author_id:
+                        await add_to_ledger(ctx.message.id, "shared receipt", round(amount, 2), user, ctx.message.author)
                 per_person_msg = ""
                 err_count = 0
                 for user_id, amount in per_person.items():
@@ -353,7 +359,6 @@ async def receipt(ctx,  mode: str = "react", tip: str = "", notes: str = ""):
                         err_count += 1     
                 per_person_msg += "Total: $" + f"{sum(per_person.values()):.2f}."
                 await ctx.reply(per_person_msg)
-                # Update ledger in Firebase
             else:
                 await ctx.reply('Invalid mode. Use "react" or "share".')
                 return
