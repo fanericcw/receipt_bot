@@ -4,11 +4,14 @@ from io import BytesIO
 import discord
 from PIL import Image
 from discord.ext import commands
+from discord.ui import Button, View
 from dotenv import load_dotenv, find_dotenv
 import firebase_admin
 from google import genai
 from firebase_admin import db
 import logging
+
+from pydantic import BaseModel
 
 load_dotenv(find_dotenv())
 
@@ -16,7 +19,6 @@ logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('bot.log'),  # Log to file
         logging.StreamHandler()           # Also log to console
     ]
 )
@@ -37,7 +39,9 @@ default_app = firebase_admin.initialize_app(cred_obj, {
 # LLM setup
 client = genai.Client(api_key=os.environ.get("GENAI_API_KEY"))
 MODEL = "gemini-2.5-flash"
+
 RECEIPT_PROMPT = """Here is a photo of a receipt. Create a JSON object where the keys are the names of the items and the values are the cost of the item including taxes and other fees listed if applicable such that all of the values add up to the total at the bottom of the receipt. Do not stack items. If an item is listed multiple times, make a new key for each instance of the item with a number appended to the end of the name. If an item has a quantity greater than 1, split it into multiple items with the same name and append a number to the end of each instance of the item. Ignore any items that are not food or drink, such as "cash" or "change". If there is a tip listed, ignore it. If there is a tax listed, include it in the price of the items. If there is no tax listed, assume that the prices already include tax. If there are any discounts or coupons listed, subtract them from the total and distribute the discount evenly across all items. Do not include any items that are not food or drink in the JSON object. Here is the receipt image:"""
+
 def ACTOR_PROMPT(pre_tip, notes, diners, aliases_dict):
     return f"""
         You are a bill-splitting assistant for a Discord server.
@@ -46,6 +50,7 @@ def ACTOR_PROMPT(pre_tip, notes, diners, aliases_dict):
         Make sure that the sum of all the values is equal to the total at the bottom of the receipt, and all diners are included in the JSON object unless the notes specifiy otherwise.
         Explain your reasoning and add it as an item in the JSON object with the key "explanation".
     """
+
 def ACTOR_PROMPT_CORRECTION(pre_tip, notes, diners, critic_explanation, aliases_dict):
     return f"""
         You are a bill-splitting assistant for a Discord server.
@@ -55,6 +60,14 @@ def ACTOR_PROMPT_CORRECTION(pre_tip, notes, diners, critic_explanation, aliases_
         Make sure that the sum of all the values is equal to the total at the bottom of the receipt, and all diners are included in the JSON object unless the notes specifiy otherwise.
         Explain your reasoning and add it as an item in the JSON object with the key "explanation".
     """
+
+class CriticOutput(BaseModel):
+    is_correct: bool
+    explanation: str
+    
+    def __getitem__(self, key):
+        return getattr(self, key)
+
 def CRITIC_PROMPT(pre_tip, notes, diners, per_person, explanation, aliases_dict):
     return f"""
         Approach this as a logic problem.
@@ -62,8 +75,28 @@ def CRITIC_PROMPT(pre_tip, notes, diners, per_person, explanation, aliases_dict)
         I have a JSON object representing how much each person owes for the bill: {per_person}. This is my explanation of how I arrived at these totals: {explanation}
         Your task is to ensure that the JSON object with tax has the bill split according to the notes given, and that the sum of all diners' payments after tip is equal to the original total. Make sure all of the listed diners are included in the JSON object, unless the notes specifiy otherwise.
         Use this dictionary to substitute all aliases with their Discord ID if needed: {aliases_dict}.
-        Elaborate on why it is correct or incorrect with respect to my explanation. You may ignore negligible rounding errors of up to 1 cent. Return your results as a JSON with two keys: "is_correct" which is true or false, and "explanation" which is your reasoning.
+        Elaborate on why it is correct or incorrect with respect to my explanation. You may ignore negligible rounding errors of up to 1 cent. 
+        
+        Return your results as a JSON with two keys: "is_correct" which is true or false, and "explanation" which is your reasoning. It may look like 
+        <example-output>
+        {{
+            "is_correct": false,
+            "explanation": "The total amount owed does not match the receipt total. User 123456789 is missing from the split."
+        }}  
+        </example-output>
     """
+
+class ShareDeleteButton(View):
+    def __init__(self, referred_message_id: int, ctx):
+        super().__init__(timeout=None)
+        self.ctx = ctx
+        self.referred_message_id = referred_message_id
+
+    @discord.ui.button(label="Delete", style=discord.ButtonStyle.danger, custom_id="delete_button")
+    async def delete_button(self, interaction: discord.Interaction, button: Button):
+        await interaction.message.delete()
+        logging.info(f"Deleting bill {self.referred_message_id} from ledger")
+        await remove_share_bill(self.referred_message_id)
 
 async def send_react_messages(dues, ctx):
     # Function to send messages for each item in the receipt with reaction options
@@ -146,22 +179,26 @@ async def query_llm(ctx, pre_tip: dict, members: list[discord.Member], tip: str,
 
             # Third prompt to verify correctness
             critic_response = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model=MODEL,
                 contents=[CRITIC_PROMPT(pre_tip, notes, diners, per_person, actor_explanation, aliases_dict)],
                 config={
                     "response_mime_type": "application/json",
+                    "response_schema": CriticOutput,
                 }
             )
-            logging.info(f"Critic LLM Response: {critic_response.text[critic_response.text.find('{'):critic_response.text.rfind('}') + 1]}")  # Log the LLM response for debugging
-            critic_result = json.loads(critic_response.text[critic_response.text.find('{'):critic_response.text.rfind('}') + 1])
-            correct = critic_result['is_correct']
+            
+            critic_result = critic_response.parsed
+            
             critic_explanation = critic_result['explanation']
+            correct = critic_result['is_correct']
+
+            logging.info(f"Critic LLM Response: {critic_explanation}")  # Log the critic's explanation for debugging
+
 
         if tip[-1] != '%':
             tip_percent = float(tip) / sum(float(v) for v in pre_tip.values())
         else:
             tip_percent = int(tip.strip('%')) / 100
-        print(tip_percent)
         for user in per_person:
             per_person[user] = float(per_person[user]) * (1 + tip_percent)
         return per_person
@@ -210,6 +247,19 @@ async def remove_from_ledger(msg_id: int, item: str, price: float,user: discord.
                     ref.set(items)
                 logging.info(f"Removed item: {removed_item}")
                 return removed_item
+            
+async def remove_share_bill(msg_id: int):
+    # Function to remove entire bill from ledger
+    ref = db.reference('/')
+    logging.info(f"Removing bill {msg_id} from ledger")
+    snapshot = ref.get()
+    if snapshot:
+        for user_id, creditors in snapshot.items():
+            if user_id != "aliases":  # Skip aliases node
+                for creditor_id, bills in creditors.items():
+                    if str(msg_id) in bills:
+                        ref.child(f'{user_id}/{creditor_id}/{msg_id}').delete()
+                        logging.info(f"Removed bill {msg_id} for user {user_id} from creditor {creditor_id}")
 
 async def fetch_user_user_debt(user: discord.Member, creditor: discord.Member) -> float:
     # Function to fetch a user's debt to a specified creditor from Firebase
@@ -302,7 +352,7 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
 async def help(ctx):
     help_text = (
         "Commands:\n"
-        '$receipt [mode] [tip] "[notes]" [mentions] - Upload a receipt image and mention users to share with. Mode can be "react" or "share". Add notes to specify how to split the bill. Message sender is included in members list already.\n'
+        '$receipt [mode] [tip(%)] "[notes]" [mentions] - Upload a receipt image and mention users to share with. Mode can be "react" or "share". Add notes to specify how to split the bill. Message sender is included in members list already.\n'
         "$due @user amount - Record that you owe a user a certain amount.\n"
         "$owes @user1 @user2 - Check how much user1 owes user2.\n"
         "$alias name - Set an alias for yourself for $receipt share function.\n"
@@ -345,7 +395,6 @@ async def receipt(ctx,  mode: str = "react", tip: str = "", notes: str = ""):
                 for user_id, amount in per_person.items():
                     author_id = ctx.message.author.id
                     user = await find_user_by_id(ctx.guild, user_id)
-                    logging.info(f"{author_id} vs {user_id}: {author_id == int(user_id)}")
                     if int(user_id) != author_id:
                         await add_to_ledger(ctx.message.id, "shared receipt", round(amount, 2), user, ctx.message.author)
                 per_person_msg = ""
@@ -358,7 +407,7 @@ async def receipt(ctx,  mode: str = "react", tip: str = "", notes: str = ""):
                         per_person_msg += f"{user_id} owes ${amount:.2f} (could not match to a user).\n"
                         err_count += 1     
                 per_person_msg += "Total: $" + f"{sum(per_person.values()):.2f}."
-                await ctx.reply(per_person_msg)
+                await ctx.reply(per_person_msg, view=ShareDeleteButton(ctx.message.id, ctx))
             else:
                 await ctx.reply('Invalid mode. Use "react" or "share".')
                 return
