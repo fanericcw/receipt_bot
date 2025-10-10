@@ -1,10 +1,13 @@
+import json
+import os
 import discord
 from PIL import Image
 import pytesseract
 from discord.ext import commands
 from dotenv import load_dotenv, find_dotenv
-import json
-import os
+import firebase_admin
+from firebase_admin import db
+from google import genai
 
 load_dotenv(find_dotenv())
 
