@@ -265,13 +265,26 @@ async def fetch_user_user_debt(user: discord.Member, creditor: discord.Member) -
     # Function to fetch a user's debt to a specified creditor from Firebase
     ref = db.reference(f'/{user.id}/{creditor.id}')
     snapshot = ref.get()
-    return sum(entry['price'] for entry in json.loads(snapshot.values())) if snapshot else 0.0
+    sum = 0.0
+    if snapshot:
+        for entry in snapshot.values():
+            for item in entry:
+                logging.info(item)
+                sum += item['price']
+    return sum
 
 async def fetch_user_debt(user: discord.Member) -> float:
     # Function to fetch a user's total debt from Firebase
     ref = db.reference(f'/{user.id}')
     snapshot = ref.get()
-    return sum(entry.values()['price'] for entry in json.loads(snapshot.values())) if snapshot else 0.0
+    sum = 0.0
+    if snapshot:
+        for creditor_id, debts in snapshot.items():
+            for entry in debts.values():
+                for item in entry:
+                    logging.info(item)
+                    sum += item['price']
+    return sum
 
 async def fetch_user_owed(user: discord.Member) -> float:
     # Function to fetch the total amount owed to a user from Firebase
@@ -422,11 +435,10 @@ async def due(ctx, member: discord.Member, amount: float):
         await ctx.reply('Amount must be positive.')
 
 @bot.command()
-async def owes(ctx, arg: list[discord.Member] = None):
-    if len(arg) == 2:
-        member1, member2 = arg
+async def owes(ctx, member1: discord.Member = None, member2: discord.Member = None):
+    if member1 and member2:
         debt_amount = await fetch_user_user_debt(member1, member2)
-        ctx.reply(f'{member1.mention} owes {member2.mention} ${debt_amount}.')
+        await ctx.reply(f'{member1.mention} owes {member2.mention} ${debt_amount}.')
     else:
         await ctx.reply('Specify two people to see money owed.')
 
