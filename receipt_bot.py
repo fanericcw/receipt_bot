@@ -96,7 +96,7 @@ class ShareDeleteButton(View):
     async def delete_button(self, interaction: discord.Interaction, button: Button):
         await interaction.message.delete()
         logging.info(f"Deleting bill {self.referred_message_id} from ledger")
-        await remove_share_bill(self.referred_message_id)
+        await remove_share_bill(self.referred_message_id, self.ctx.guild)
 
 async def send_react_messages(dues, ctx):
     # Function to send messages for each item in the receipt with reaction options
@@ -111,7 +111,8 @@ async def parse_reaction_message(message):
     item = message.content.split(", Price: $")[0].split("Item: ")[1]
     original_msg = await message.channel.fetch_message(message.reference.message_id)
     creditor = original_msg.author
-    return msg_id, item, price, creditor
+    guild = message.guild
+    return msg_id, item, price, creditor, guild
 
 async def read_receipt(image: discord.Attachment):
     # Function to parse receipt image and return a dictionary of items and prices
@@ -135,18 +136,18 @@ async def get_aliases_dict(ctx) -> dict:
     else:
         await ctx.reply("No aliases found in the database for this server.")
 
-async def find_user_by_id(guild: discord.Guild, id: int) -> discord.Member | None:
+async def find_user_by_id(guild: discord.Guild, user_id: int) -> discord.Member | None:
     """Search by user ID"""
-    member = guild.get_member(id)
+    member = guild.get_member(user_id)
     if member:
         return member
     
     # If not in cache, try fetching directly (requires member intent)
     try:
-        member = await guild.fetch_member(id)
+        member = await guild.fetch_member(user_id)
         return member
     except discord.NotFound:
-        logging.info(f"Member with ID {id} not found in guild {guild.name}")
+        logging.info(f"Member with ID {user_id} not found in guild {guild.name}")
         return None
     except discord.HTTPException as e:
         logging.error(f"Error fetching member: {e}")
@@ -207,9 +208,9 @@ async def query_llm(ctx, pre_tip: dict, members: list[discord.Member], tip: str,
         await ctx.reply("There was an error processing the receipt. Please try again.")
         return {}
 
-async def add_to_ledger(msg_id: int, item: str, price: float, user: discord.Member, creditor: discord.Member):
+async def add_to_ledger(msg_id: int, item: str, price: float, guild: discord.Guild, user: discord.Member, creditor: discord.Member):
     # Function to add item and price to ledger.json
-    ref = db.reference(f'/{user.id}/{creditor.id}/{msg_id}')
+    ref = db.reference(f'/{guild.id}/{user.id}/{creditor.id}/{msg_id}')
     
     # Get existing items for this msg_id
     existing_data = ref.get()
@@ -231,9 +232,9 @@ async def add_to_ledger(msg_id: int, item: str, price: float, user: discord.Memb
     # Save the updated list
     ref.set(items)
 
-async def remove_from_ledger(msg_id: int, item: str, price: float,user: discord.Member, creditor: discord.Member):
+async def remove_from_ledger(msg_id: int, item: str, guild: discord.Guild, user: discord.Member, creditor: discord.Member):
     # Function to remove item and price from ledger.json
-    ref = db.reference(f'/{user.id}/{creditor.id}/{msg_id}')
+    ref = db.reference(f'/{guild.id}/{user.id}/{creditor.id}/{msg_id}')
     items = ref.get()
     if items:
         for i, item_data in enumerate(items):
@@ -248,9 +249,9 @@ async def remove_from_ledger(msg_id: int, item: str, price: float,user: discord.
                 logging.info(f"Removed item: {removed_item}")
                 return removed_item
             
-async def remove_share_bill(msg_id: int):
+async def remove_share_bill(msg_id: int, guild: discord.Guild):
     # Function to remove entire bill from ledger
-    ref = db.reference('/')
+    ref = db.reference(f'/{guild.id}')
     logging.info(f"Removing bill {msg_id} from ledger")
     snapshot = ref.get()
     if snapshot:
@@ -261,9 +262,9 @@ async def remove_share_bill(msg_id: int):
                         ref.child(f'{user_id}/{creditor_id}/{msg_id}').delete()
                         logging.info(f"Removed bill {msg_id} for user {user_id} from creditor {creditor_id}")
 
-async def fetch_user_user_debt(user: discord.Member, creditor: discord.Member) -> float:
+async def fetch_user_user_debt(user: discord.Member, creditor: discord.Member, guild: discord.Guild) -> float:
     # Function to fetch a user's debt to a specified creditor from Firebase
-    ref = db.reference(f'/{user.id}/{creditor.id}')
+    ref = db.reference(f'/{guild.id}/{user.id}/{creditor.id}')
     snapshot = ref.get()
     sum = 0.0
     if snapshot:
@@ -273,9 +274,9 @@ async def fetch_user_user_debt(user: discord.Member, creditor: discord.Member) -
                 sum += item['price']
     return sum
 
-async def fetch_user_debt(user: discord.Member) -> float:
-    # Function to fetch a user's total debt from Firebase
-    ref = db.reference(f'/{user.id}')
+async def fetch_user_debt(user: discord.Member, guild: discord.Guild) -> float:
+    # Function to fetch a user's total debt in a server from Firebase
+    ref = db.reference(f'/{guild.id}/{user.id}')
     snapshot = ref.get()
     sum = 0.0
     if snapshot:
@@ -285,17 +286,6 @@ async def fetch_user_debt(user: discord.Member) -> float:
                     logging.info(item)
                     sum += item['price']
     return sum
-
-async def fetch_user_owed(user: discord.Member) -> float:
-    # Function to fetch the total amount owed to a user from Firebase
-    ref = db.reference('/')
-    snapshot = ref.get()
-    total_owed = 0.0
-    if snapshot:
-        for creditor_id, debts in snapshot.items():
-            if user.id in debts:
-                total_owed += sum(entry['price'] for entry in json.loads(debts[user.id].values()))
-    return total_owed
 
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
@@ -323,12 +313,12 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
         
         logging.info(f"Reaction added: {user.name} reacted to bot message")
         
-        msg_id, item, price, creditor = await parse_reaction_message(message)
+        msg_id, item, price, creditor, guild = await parse_reaction_message(message)
         logging.info(f"Parsed: {item} - ${price} for {creditor.mention}")
         if user.id == creditor.id:
             logging.info(f"Ignoring reaction: {user.name} is the creditor")
             return
-        await add_to_ledger(msg_id, item, price, user, creditor)
+        await add_to_ledger(msg_id, item, price, guild, user, creditor)
 
 
 @bot.event
@@ -357,9 +347,9 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
         
         logging.info(f"Reaction removed: {user.name} removed reaction from bot message")
         
-        msg_id, item, price, creditor = await parse_reaction_message(message)
+        msg_id, item, price, creditor, guild = await parse_reaction_message(message)
         logging.info(f"Removing: {item} - ${price} for {creditor.mention}")
-        await remove_from_ledger(msg_id, item, price, user, creditor)
+        await remove_from_ledger(msg_id, item, guild, user, creditor)
 
 @bot.command()
 async def help(ctx):
@@ -368,6 +358,7 @@ async def help(ctx):
         '$receipt [mode] [tip(%)] "[notes]" [mentions] - Upload a receipt image and mention users to share with. Mode can be "react" or "share". Add notes to specify how to split the bill. Message sender is included in members list already.\n'
         "$due @user amount - Record that you owe a user a certain amount.\n"
         "$owes @user1 @user2 - Check how much user1 owes user2.\n"
+        "$owed - Check how much you owe in total in this server.\n"
         "$alias name - Set an alias for yourself for $receipt share function.\n"
     )
     await ctx.reply(help_text, mention_author=False)
@@ -409,7 +400,7 @@ async def receipt(ctx,  mode: str = "react", tip: str = "", notes: str = ""):
                     author_id = ctx.message.author.id
                     user = await find_user_by_id(ctx.guild, user_id)
                     if int(user_id) != author_id:
-                        await add_to_ledger(ctx.message.id, "shared receipt", round(amount, 2), user, ctx.message.author)
+                        await add_to_ledger(ctx.message.id, "shared receipt", round(amount, 2), ctx.guild, user, ctx.message.author)
                 per_person_msg = ""
                 err_count = 0
                 for user_id, amount in per_person.items():
@@ -429,7 +420,7 @@ async def receipt(ctx,  mode: str = "react", tip: str = "", notes: str = ""):
 async def due(ctx, member: discord.Member, amount: float):
     if amount > 0:
         # Update ledger with amount owed
-        await add_to_ledger(ctx.message.id, "manual entry", amount, ctx.message.author, member)
+        await add_to_ledger(ctx.message.id, "manual entry", amount, ctx.guild, ctx.message.author, member)
         await ctx.reply(f'Updated {member.mention}\'s debt by ${amount}.')
     else:
         await ctx.reply('Amount must be positive.')
@@ -437,10 +428,15 @@ async def due(ctx, member: discord.Member, amount: float):
 @bot.command()
 async def owes(ctx, member1: discord.Member = None, member2: discord.Member = None):
     if member1 and member2:
-        debt_amount = await fetch_user_user_debt(member1, member2)
+        debt_amount = await fetch_user_user_debt(member1, member2, ctx.guild.id)
         await ctx.reply(f'{member1.mention} owes {member2.mention} ${debt_amount}.')
     else:
         await ctx.reply('Specify two people to see money owed.')
+
+@bot.command()
+async def owed(ctx):
+    debt_amount = await fetch_user_debt(ctx.message.author, ctx.guild)
+    await ctx.reply(f'You owe ${debt_amount} in this server.')
 
 @bot.command()
 async def alias(ctx, alias: str):
