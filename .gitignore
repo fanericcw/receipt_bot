@@ -7,3 +7,4 @@ firebase_cred.json
 *.png
 uv.lock
 *.ipynb
+bot.log
