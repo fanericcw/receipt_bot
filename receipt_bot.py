@@ -3,7 +3,6 @@ import os
 from io import BytesIO
 import discord
 from PIL import Image
-import pytesseract
 from discord.ext import commands
 from discord.ui import Button, View
 from dotenv import load_dotenv, find_dotenv
@@ -28,8 +27,6 @@ intents = discord.Intents.default()
 intents.message_content = True
 intents.reactions = True
 intents.members = True
-import json
-import os
 
 load_dotenv(find_dotenv())
 
