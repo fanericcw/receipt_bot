@@ -100,7 +100,7 @@ class ShareDeleteButton(View):
     @discord.ui.button(label="Delete", style=discord.ButtonStyle.danger, custom_id="delete_button")
     async def delete_button(self, interaction: discord.Interaction, button: Button):
         await interaction.message.delete()
-        logging.info(f"Deleting bill {self.referred_message_id} from ledger")
+        # logging.info(f"Deleting bill {self.referred_message_id} from ledger")
         await remove_share_bill(self.referred_message_id, self.ctx.guild)
 
 async def send_react_messages(dues, ctx):
@@ -111,7 +111,7 @@ async def send_react_messages(dues, ctx):
 
 async def parse_reaction_message(message):
     msg_id = message.id
-    logging.info("Price: " + message.content.split(", Price: $")[1][:-1])
+    # logging.info("Price: " + message.content.split(", Price: $")[1][:-1])
     price = float(message.content.split(", Price: $")[1][:-1])
     item = message.content.split(", Price: $")[0].split("Item: ")[1]
     original_msg = await message.channel.fetch_message(message.reference.message_id)
@@ -127,7 +127,7 @@ async def read_receipt(image: discord.Attachment):
     response = client.models.generate_content(
         model=MODEL, contents=[RECEIPT_PROMPT, receipt_image]
     )
-    logging.info(f"LLM Response: {response.text[response.text.find('{'):response.text.rfind('}') + 1]}")  # Log the LLM response for debugging
+    # logging.info(f"LLM Response: {response.text[response.text.find('{'):response.text.rfind('}') + 1]}")  # Log the LLM response for debugging
     items = json.loads(response.text[response.text.find('{'):response.text.rfind('}') + 1])
     return items
 
@@ -136,7 +136,7 @@ async def get_aliases_dict(ctx) -> dict:
     snapshot = ref.get()
     if snapshot:
         aliases_dict = {v: k for k, v in snapshot.items()}
-        logging.info(f"Aliases dict: {aliases_dict}")  # Log the aliases dictionary for debugging
+        # logging.info(f"Aliases dict: {aliases_dict}")  # Log the aliases dictionary for debugging
         return aliases_dict
     else:
         await ctx.reply("No aliases found in the database for this server.")
@@ -152,7 +152,7 @@ async def find_user_by_id(guild: discord.Guild, user_id: int) -> discord.Member 
         member = await guild.fetch_member(user_id)
         return member
     except discord.NotFound:
-        logging.info(f"Member with ID {user_id} not found in guild {guild.name}")
+        # logging.info(f"Member with ID {user_id} not found in guild {guild.name}")
         return None
     except discord.HTTPException as e:
         logging.error(f"Error fetching member: {e}")
@@ -178,7 +178,7 @@ async def query_llm(ctx, pre_tip: dict, members: list[discord.Member], tip: str,
 
             actor_response_text = actor_response.text
             # logging.info(f"Actor LLM Raw Response: {actor_response_text}")
-            logging.info(f"Actor LLM Response: {actor_response_text[actor_response_text.find('{'):actor_response_text.rfind('}') + 1]}")  # Log the LLM response for debugging
+            # logging.info(f"Actor LLM Response: {actor_response_text[actor_response_text.find('{'):actor_response_text.rfind('}') + 1]}")  # Log the LLM response for debugging
             result = json.loads(actor_response_text[actor_response_text.find('{'):actor_response_text.rfind('}') + 1])
             actor_explanation = result.pop("explanation")
             per_person = dict(result)
@@ -198,7 +198,7 @@ async def query_llm(ctx, pre_tip: dict, members: list[discord.Member], tip: str,
             critic_explanation = critic_result['explanation']
             correct = critic_result['is_correct']
 
-            logging.info(f"Critic LLM Response: {critic_explanation}")  # Log the critic's explanation for debugging
+            # logging.info(f"Critic LLM Response: {critic_explanation}")  # Log the critic's explanation for debugging
 
 
         if tip[-1] != '%':
@@ -251,7 +251,7 @@ async def remove_from_ledger(msg_id: int, item: str, guild: discord.Guild, user:
                     ref.delete()
                 else:
                     ref.set(items)
-                logging.info(f"Removed item: {removed_item}")
+                # logging.info(f"Removed item: {removed_item}")
                 return removed_item
             
 async def remove_share_bill(msg_id: int, guild: discord.Guild):
@@ -265,7 +265,7 @@ async def remove_share_bill(msg_id: int, guild: discord.Guild):
                 for creditor_id, bills in creditors.items():
                     if str(msg_id) in bills:
                         ref.child(f'{user_id}/{creditor_id}/{msg_id}').delete()
-                        logging.info(f"Removed bill {msg_id} for user {user_id} from creditor {creditor_id}")
+                        # logging.info(f"Removed bill {msg_id} for user {user_id} from creditor {creditor_id}")
 
 async def fetch_user_user_debt(user: discord.Member, creditor: discord.Member, guild: discord.Guild) -> float:
     # Function to fetch a user's debt to a specified creditor from Firebase
@@ -275,7 +275,7 @@ async def fetch_user_user_debt(user: discord.Member, creditor: discord.Member, g
     if snapshot:
         for entry in snapshot.values():
             for item in entry:
-                logging.info(item)
+                # logging.info(item)
                 sum += item['price']
     return sum
 
@@ -288,13 +288,13 @@ async def fetch_user_debt(user: discord.Member, guild: discord.Guild) -> float:
         for creditor_id, debts in snapshot.items():
             for entry in debts.values():
                 for item in entry:
-                    logging.info(item)
+                    # logging.info(item)
                     sum += item['price']
     return sum
 
 @bot.event
 async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
-    logging.info(f"Raw reaction event: User {payload.user_id} added {payload.emoji}")
+    # logging.info(f"Raw reaction event: User {payload.user_id} added {payload.emoji}")
     
     # Ignore bot's own reactions
     if payload.user_id == bot.user.id:
@@ -316,19 +316,19 @@ async def on_raw_reaction_add(payload: discord.RawReactionActionEvent):
     if message.author == bot.user:
         user = await bot.fetch_user(payload.user_id)
         
-        logging.info(f"Reaction added: {user.name} reacted to bot message")
+        # logging.info(f"Reaction added: {user.name} reacted to bot message")
         
         msg_id, item, price, creditor, guild = await parse_reaction_message(message)
-        logging.info(f"Parsed: {item} - ${price} for {creditor.mention}")
+        # logging.info(f"Parsed: {item} - ${price} for {creditor.mention}")
         if user.id == creditor.id:
-            logging.info(f"Ignoring reaction: {user.name} is the creditor")
+            # logging.info(f"Ignoring reaction: {user.name} is the creditor")
             return
         await add_to_ledger(msg_id, item, price, guild, user, creditor)
 
 
 @bot.event
 async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
-    logging.info(f"Raw reaction remove event: User {payload.user_id} removed {payload.emoji}")
+    # logging.info(f"Raw reaction remove event: User {payload.user_id} removed {payload.emoji}")
     
     # Ignore bot's own reactions
     if payload.user_id == bot.user.id:
@@ -350,10 +350,10 @@ async def on_raw_reaction_remove(payload: discord.RawReactionActionEvent):
     if message.author == bot.user:
         user = await bot.fetch_user(payload.user_id)
         
-        logging.info(f"Reaction removed: {user.name} removed reaction from bot message")
+        # logging.info(f"Reaction removed: {user.name} removed reaction from bot message")
         
         msg_id, item, price, creditor, guild = await parse_reaction_message(message)
-        logging.info(f"Removing: {item} - ${price} for {creditor.mention}")
+        # logging.info(f"Removing: {item} - ${price} for {creditor.mention}")
         await remove_from_ledger(msg_id, item, guild, user, creditor)
 
 @bot.command()
@@ -388,7 +388,7 @@ async def receipt(ctx,  mode: str = "react", tip: str = "", notes: str = ""):
                         tip_percent = float(tip) / sum(float(v) for v in pre_tip.values())
                     else:
                         tip_percent = int(tip.strip('%')) / 100
-                    logging.info(f"Tip percent: {tip_percent}")
+                    # logging.info(f"Tip percent: {tip_percent}")
                     post_tip = {item: price * (1 + tip_percent) for item, price in pre_tip.items()}
                 # Send messages for each item in the receipt
                 await send_react_messages(post_tip, ctx)
@@ -399,7 +399,7 @@ async def receipt(ctx,  mode: str = "react", tip: str = "", notes: str = ""):
                 # Parse receipt image
                 pre_tip = await read_receipt(image)
                 # Send to LLM for processing
-                logging.info("Notes: " + notes)
+                # logging.info("Notes: " + notes)
                 per_person = await query_llm(ctx, pre_tip, members, tip, notes)
                 for user_id, amount in per_person.items():
                     author_id = ctx.message.author.id
@@ -459,10 +459,10 @@ async def debug_aliases(ctx, name: str):
     ref = db.reference('/aliases')
     snapshot = ref.get()
     if snapshot:
-        logging.info(f"Alias snapshot: {snapshot}")  # Log the snapshot for debugging
+        # logging.info(f"Alias snapshot: {snapshot}")  # Log the snapshot for debugging
         for user_id, data in snapshot.items():
             if data.get('alias', '').lower() == name.lower():
-                logging.info(f"Found alias: {user_id} for {name}")  # Log the found alias
+                # logging.info(f"Found alias: {user_id} for {name}")  # Log the found alias
                 await ctx.reply(f"Alias for {name}: {user_id}")
     else:
         await ctx.reply("No aliases found in the database.")
