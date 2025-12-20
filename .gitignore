@@ -1,3 +1,4 @@
+__pycache__/
 .env
 *.txt
 .venv
@@ -8,3 +9,4 @@ firebase_cred.json
 uv.lock
 *.ipynb
 bot.log
+test_photos
