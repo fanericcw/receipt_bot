@@ -1,6 +1,5 @@
 __pycache__/
 .env
-*.txt
 .venv
 node_modules
 firebase_cred.json

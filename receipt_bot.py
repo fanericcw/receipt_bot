@@ -170,7 +170,7 @@ async def help(ctx):
     help_text = (
         "Commands:\n"
         '$receipt [mode] [tip(%)] "[notes]" [mentions] - Upload a receipt image and mention users to share with. Mode can be "react" or "share". Add notes to specify how to split the bill. Message sender is included in members list already.\n'
-        "$due @user amount - Record that you owe a user a certain amount.\n"
+        "$iou @user amount - Record that you owe a user a certain amount.\n"
         "$owes @user1 @user2 - Check how much user1 owes user2.\n"
         "$owed - Check how much you owe in total in this server.\n"
         "$alias name - Set an alias for yourself for $receipt share function.\n"
@@ -231,7 +231,7 @@ async def receipt(ctx,  mode: str = "react", tip: str = "", notes: str = ""):
                 return
 
 @bot.command()
-async def due(ctx, member: discord.Member, amount: float):
+async def iou(ctx, member: discord.Member, amount: float):
     if amount > 0:
         # Update ledger with amount owed
         await add_to_ledger(ctx.message.id, "manual entry", amount, ctx.guild, ctx.message.author, member)
