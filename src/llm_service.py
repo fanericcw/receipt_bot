@@ -53,7 +53,7 @@ def CRITIC_PROMPT(pre_tip, notes, diners, per_person, explanation, aliases_dict)
         </example-output>
     """
 
-async def read_receipt(client: genai.Client, model: str, image: discord.Attachment):
+async def read_receipt(client: genai.Client, model: str, image: discord.File):
     # Function to parse receipt image and return a dictionary of items and prices
     image_bytes = await image.read()
     receipt_image = Image.open(BytesIO(image_bytes))
@@ -61,7 +61,7 @@ async def read_receipt(client: genai.Client, model: str, image: discord.Attachme
     response = client.models.generate_content(
         model=model, contents=[RECEIPT_PROMPT, receipt_image]
     )
-    # logging.info(f"LLM Response: {response.text[response.text.find('{'):response.text.rfind('}') + 1]}")  # Log the LLM response for debugging
+    logging.info(f"LLM Response: {response.text[response.text.find('{'):response.text.rfind('}') + 1]}")  # Log the LLM response for debugging
     items = json.loads(response.text[response.text.find('{'):response.text.rfind('}') + 1])
     return items
 
