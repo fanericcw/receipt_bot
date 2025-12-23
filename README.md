@@ -11,7 +11,7 @@ A Discord bot that leverages Google Gemini to parse your receipts and split the 
         - `share`: Split the costs among mentioned users according to instructions given in `notes`
     - `tip(%)` (optional): Amount of tip added to the bill. If tip is a percentage, add % to the end of the number. Otherwise just input a number
     - `notes` (`share` only): Instructions for the LLM to split costs. Items can be specified to be split between a subset of mentioned users
-    - `mentions` (`share` only): Mention using `@` to include participants to the bill. Author is included by default
+    - `mentions` (`share` only): Mention using `@` to include participants to the bill. **Author is included by default**
 - `$iou @user amount`: Record that you owe a user a certain amount
 - `$owes @user1 @user2`: Check how much user1 owes user2
 - `$owed`: Check how much you owe in total in current server
@@ -23,7 +23,7 @@ A Discord bot that leverages Google Gemini to parse your receipts and split the 
 $alias Alice      - This sets Alice as @LostGirl's alias
 
 (@MadHatter)
-$alias Hatman    - This sets Alice as @MadHatter's alias
+$alias Hatman    - This sets Hatman as @MadHatter's alias
 
 - Since @LateRabbit has not set up an alias, @MadHatter will have to use their Discord handle
 $receipt share 15% "Hatman had the hot dog. Alice and LateRabbit had an iced tea each. Alice and Hatman shared a pizza" @LostGirl @LateRabbit
