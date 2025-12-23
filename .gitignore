@@ -5,7 +5,7 @@ node_modules
 firebase_cred.json
 *.jpg
 *.png
-uv.lock
 *.ipynb
 bot.log
 test_photos
+.pytest_cache
