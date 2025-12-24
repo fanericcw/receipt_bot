@@ -2,13 +2,14 @@ from firebase_admin import db
 import discord
 import logging
 
+
 async def add_to_ledger(msg_id: int, item: str, price: float, guild: discord.Guild, user: discord.Member, creditor: discord.Member):
     # Function to add item and price to ledger.json
     ref = db.reference(f'/{guild.id}/{user.id}/{creditor.id}/{msg_id}')
-    
+
     # Get existing items for this msg_id
     existing_data = ref.get()
-    
+
     if existing_data is None:
         # First item for this message
         items = [{
@@ -22,7 +23,7 @@ async def add_to_ledger(msg_id: int, item: str, price: float, guild: discord.Gui
             'item': item,
             'price': price,
         })
-    
+
     # Save the updated list
     ref.set(items)
 
@@ -42,7 +43,7 @@ async def remove_from_ledger(msg_id: int, item: str, guild: discord.Guild, user:
                     ref.set(items)
                 # logging.info(f"Removed item: {removed_item}")
                 return removed_item
-            
+
 async def remove_share_bill(msg_id: int, guild: discord.Guild):
     # Function to remove entire bill from ledger
     ref = db.reference(f'/{guild.id}')
